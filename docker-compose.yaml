@@ -1,0 +1,111 @@
+version: "3.8"
+
+services:
+  # ------------------------
+  # 1. Zookeeper (для Kafka)
+  # ------------------------
+  zookeeper:
+    image: bitnami/zookeeper:3.8
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/bitnami/zookeeper
+
+  # ------------------------
+  # 2. Kafka
+  # ------------------------
+  kafka:
+    image: bitnami/kafka:3.5
+    depends_on:
+      - zookeeper
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_ZOOKEEPER_CONNECT=zookeeper:2181
+      - KAFKA_LISTENERS=PLAINTEXT://:9092
+      - KAFKA_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - ALLOW_PLAINTEXT_LISTENER=yes
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+
+  # ------------------------
+  # 3. PostgreSQL
+  # ------------------------
+  postgres:
+    image: postgres:14
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=postgres
+    volumes:
+      # Заливаем init.sql при старте и сохраняем данные
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  # ------------------------
+  # 4. Flink JobManager
+  # ------------------------
+  flink-jobmanager:
+    image: flink:1.15-scala_2.12-java11
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend.filesystem.checkpointdir: file:///flink/checkpoints
+    depends_on:
+      - kafka
+      - postgres
+    volumes:
+      # Монтируем папку с jar-файлами Flink-джоб
+      - ./flink-jobs:/opt/flink/usrlib
+      # Директория для checkpoint-ов
+      - flink_checkpoints:/flink/checkpoints
+
+  # ------------------------
+  # 5. Flink TaskManager
+  # ------------------------
+  flink-taskmanager:
+    image: flink:1.15-scala_2.12-java11
+    command: taskmanager
+    depends_on:
+      - flink-jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        state.backend.filesystem.checkpointdir: file:///flink/checkpoints
+    volumes:
+      # Общий checkpoint-сторедж с JobManager
+      - flink_checkpoints:/flink/checkpoints
+
+  # ------------------------
+  # 6. Python Producer (CSV→JSON→Kafka)
+  # ------------------------
+  producer:
+    image: python:3.9-slim
+    depends_on:
+      - kafka
+    working_dir: /app
+    volumes:
+      - ./kafka-producer:/app
+      - ./mock_data:/app/mock_data
+    entrypoint: >
+      /bin/bash -c "
+      pip install --no-cache-dir -r requirements.txt &&
+      python producer.py
+      "
+
+volumes:
+  pgdata:
+  kafka_data:
+  zookeeper_data:
+  flink_checkpoints:
